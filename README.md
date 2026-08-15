@@ -1,48 +1,90 @@
-# Database Normal Forms — Interactive Blueprint
+# Kafka Cluster Calculator
 
-An interactive, click-to-normalize explainer for Database Normal Forms 1NF, 2NF, and 3NF, built as a single-file React artifact.
+A single-file interactive React artifact for sizing Kafka storage, partitions, and
+consumer parallelism from basic throughput inputs. Blueprint-style spec sheet UI —
+no backend, no dependencies beyond React.
 
-## What it does
+## What it computes
 
-- Explains what normalization is and when you actually need to care about it.
-- Three tabs — one per normal form — each with:
-  - A plain-language breakdown: **what happens**, **when to use it**, **tradeoff**.
-  - A live "before" table that visibly violates that normal form, with the offending duplicated/repeating values highlighted.
-  - A **Normalize** button that splits the table exactly the way that rule requires, with the new/moved values highlighted.
-  - A **Reset** button to replay it.
-
-## The three examples
-
-| Form | Problem shown | Fix |
-|---|---|---|
-| **1NF** | An `orders` row stores multiple products in one comma-separated cell (repeating group). | Split into one atomic row per product. |
-| **2NF** | An `order_items` table (composite key: `order_id` + `product_id`) repeats `product_name` / `product_price` on every order line — those columns only depend on `product_id`, not the whole key (partial dependency). | Move `product_name` / `product_price` into a separate `products` table. |
-| **3NF** | A `customers` table repeats `city` for every customer sharing a `zip_code` — `city` really depends on `zip_code`, not directly on `customer_id` (transitive dependency). | Move `city` into a separate `zip_codes` lookup table. |
-
-## Files
-
-| File | Purpose |
+| Output | From |
 |---|---|
-| `normal-forms-blueprint.jsx` | The React component. Self-contained — styles, data, and logic all in one file. |
+| Sustained / peak ingest rate | `msgs/sec × avg message size`, peak = sustained × peak multiplier |
+| Daily data volume | `ingest bytes/sec × 86400` |
+| Retained storage (raw) | `daily volume × retention days` |
+| Retained storage (with replication) | `raw retention × replication factor` |
+| Storage per broker | `total storage ÷ broker count` (assumes even distribution) |
+| Recommended partition count | `max(t/p, t/c, consumer count)` |
+| Messages per partition per second | `msgs/sec ÷ recommended partitions` |
 
+## Partition formula
 
-## Design notes
+This follows Confluent's canonical partition-sizing guidance:
 
-- Same engineering-blueprint visual language as the companion SCD (Slowly Changing Dimensions) blueprint — navy grid background, cyan rules, amber "redline" highlights, corner registration marks, IBM Plex Mono / IBM Plex Sans.
-- **Responsive tables**: below the `sm` breakpoint, every table renders as stacked label/value cards instead of a wide table — no reliance on horizontal scrolling, since mobile browsers hide scrollbars by default.
-- **Multi-table results**: 2NF and 3NF split one table into two. On `sm`+ screens the resulting tables sit side by side; on mobile they stack vertically, each still rendering as cards.
-- **Data model**: each tab's `tablesFor*NF(applied)` function returns an array of `{ caption, columns, rows }` table specs, rendered by a shared `RecordTable` component — the same pattern used in the SCD blueprint, so the two artifacts share structure and are easy to keep in sync.
-
-## Extending it
-
-- To swap in your own example, edit the `tablesFor1NF` / `tablesFor2NF` / `tablesFor3NF` functions and the matching `action` string in `COPY`.
-- To add BCNF, 4NF, or 5NF, add an entry to `TABS`, `COPY`, and a new `tablesForXNF` builder, then register it in `TABLE_BUILDERS`.
-
-## Local development
-
-```bash
-npm install
-npm run dev
+```
+partitions = max(t/p, t/c, consumer_count)
 ```
 
-Opens at `http://localhost:5173`
+- **t** — target peak throughput (bytes/sec)
+- **p** — throughput one partition can sustain on the *produce* side
+- **c** — throughput one consumer instance can sustain on the *consume* side, per partition
+- **consumer_count** — a hard floor, since partition count is the ceiling on
+  useful consumer parallelism (extra consumers beyond partition count sit idle)
+
+The calculator shows all three sub-results (produce-bound, consume-bound,
+consumer-count floor) so you can see which one is actually driving the
+recommendation, rather than just the max.
+
+## Inputs
+
+**Message throughput**
+- Messages per second
+- Average message size (KB)
+- Peak multiplier — spikes above steady-state; affects partition sizing, not storage
+
+**Retention & storage**
+- Retention period (days)
+- Replication factor
+- Broker count
+
+**Partitions & consumers**
+- Consumer group size (instances)
+- Throughput per partition — produce (MB/s)
+- Throughput per partition — consume (MB/s)
+
+## Known assumptions & limitations
+
+Read this before trusting the numbers for a real sizing decision:
+
+- **Storage is uncompressed and unindexed.** No adjustment for compression codec,
+  Kafka's own index/log-segment overhead, or per-record protocol overhead
+  (headers, keys). Compression alone can cut real disk usage 2–4x depending on
+  codec and payload; this tool won't reflect that.
+- **Partition throughput defaults are rules of thumb, not measurements.**
+  10 MB/s per partition is conservative — Confluent's own docs just say "tens
+  of MB/s," and modern brokers with tuning often exceed 50–100 MB/s per
+  partition. Benchmark your actual produce/consume path and update the fields;
+  don't trust the defaults for capacity planning.
+- **Consume throughput is about your application, not Kafka.** It's bounded by
+  whatever your consumer does per message — DB writes, downstream API calls,
+  transforms. If that's slow, it will be the binding constraint before produce
+  throughput or idle-consumer math ever come into play.
+- **Assumes even distribution.** Storage-per-broker and messages-per-partition
+  assume balanced partition placement and uniform key distribution. Real-world
+  key skew (hot keys, uneven partitioning) will unbalance both.
+- **Doesn't model partition-count ceilings.** Very high partition counts hit
+  real limits this tool ignores entirely: file descriptors (roughly two per
+  log segment per partition), `vm.max_map_count`, controller/metadata
+  overhead, and longer leader-election/recovery times during broker restarts.
+  Don't treat "more partitions" as free just because the throughput formula
+  says so.
+- **Peak multiplier is a manual estimate.** There's no traffic-pattern modeling
+  behind it — it's whatever multiple of sustained throughput you expect during
+  spikes, entered by hand.
+
+## Usage
+
+This is a self-contained React component (`kafka-calculator.jsx`) with no
+external state or API calls — safe to drop into any React environment or
+render directly as a Claude artifact. All calculation logic lives in a single
+`useMemo` block if you want to adapt the formulas or add fields (e.g. a
+compression ratio input)
